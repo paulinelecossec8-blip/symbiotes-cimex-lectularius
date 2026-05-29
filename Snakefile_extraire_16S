@@ -1,0 +1,39 @@
+GENOME_DIR = "/home/pauline/Documents/génomes_bactéries_symbiotiques/" 
+RESULT_DIR = "result_barrnap/"
+
+SAMPLES = glob_wildcards(GENOME_DIR + "{sample}.fna").sample
+
+print(SAMPLES) 
+
+rule all:
+    input:
+        expand(RESULT_DIR + "final_16S/{sample}_16S.fna", sample = SAMPLES)
+
+rule run_barrnap:
+    input:
+        GENOME_DIR + "{sample}.fna" 
+    output: 
+        temp(RESULT_DIR + "gff/{sample}.gff")
+    shell:
+        "barrnap --kingdom bac {input} > {output}"
+
+
+rule extract_16S:
+    input: 
+        fasta = GENOME_DIR + "{sample}.fna",
+        gff = RESULT_DIR + "gff/{sample}.gff"
+    output:
+        RESULT_DIR + "final_16S/{sample}_16S.fna"
+    shell: 
+        """
+        grep "16S_rRNA" {input.gff} > {input.gff}.tmp || true
+
+	if [ -s {input.gff}.tmp ]; then
+            bedtools getfasta -fi {input.fasta} -bed {input.gff}.tmp -fo {output} -s -name 
+	else
+	    echo ">no_16S_found_for_{wildcards.sample}" > {output}
+	fi
+        
+        rm {input.gff}.tmp
+        """
+
