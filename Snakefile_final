@@ -1,0 +1,121 @@
+import os
+
+# chemins racines
+BASE_DIR = "/beegfs/data/plecossec/cimex/"
+DONNEES = BASE_DIR + "bams/"
+OUT = BASE_DIR + "unmapped_data/"
+DB = BASE_DIR + "database/"
+MAPPING = BASE_DIR + "result_mapping/"
+FILTERING = BASE_DIR + "result_filtering/"
+
+#chemins spécifiques
+CONDA_DIR = "/beegfs/home/plecossec/manip_1/envs/"
+
+SAMPLES = glob_wildcards(OUT + "{sample}_R1_unmapped2.fastq").sample
+
+
+rule all:
+    input:
+      expand(FILTERING + "{sample}_filtered.bam", sample = SAMPLES)
+
+#extraire unmapped sur génome de ref
+rule extract_unmapped:
+    input:
+# à partir d'un fichier bam
+        bam = DONNEES + "{sample}.bam"
+# redonne un fastq
+    output:
+        r1 = OUT + "{sample}_R1_unmapped2.fastq",
+        r2 = OUT + "{sample}_R2_unmapped2.fastq"
+    conda:
+        CONDA_DIR + "bwa2_samtools.yaml"
+#log renvoie erreurs
+    log:
+        OUT + "logs/extract/{sample}.log"
+#benchmark donne info sur ressources réelles utilisées par le script
+    benchmark:
+        OUT + "benchmarks/extract/{sample}_extract.txt"
+#ressource qu'on demande à l'ordi pour run le script
+    resources: 
+        runtime = 60,
+        mem_mb = 4000,
+        cpus_per_task = 4
+
+    shell:
+        """
+        samtools view -@ {resources.cpus_per_task} \
+            -b -f 12 {input.bam} | \
+        samtools fastq -@ {resources.cpus_per_task} -n \
+            -1 {output.r1} \
+            -2 {output.r2} \
+            - 2> {log}
+        """
+#règle qui à partir d'un fastq redonne un bam, mapping des lectures sur DB 
+rule mapping_database:
+    input:
+        r1 = OUT + "{sample}_R1_unmapped2.fastq",
+        r2 = OUT + "{sample}_R2_unmapped2.fastq",
+        ref = DB + "database_finale_finale.fasta"
+    output:
+        bam = MAPPING + "{sample}_mapped_database.bam"
+    conda:
+        CONDA_DIR + "bwa2_samtools.yaml"
+    log:
+        OUT + "logs/mapping/{sample}.log"
+    benchmark:
+        OUT + "benchmarks/mapping/{sample}_mapped.txt"
+    threads: 8
+    resources:
+        runtime = 300,
+        mem_mb = 15000
+
+#on donne R1 et R2 et redonne un seul fichier qui contient les info
+#bwa fait l'alignement
+#samtools view convertit sam en bam 
+#samtools sort classe les lignes du fichier selon coordonnées génomiques
+
+    shell:
+        """
+        bwa-mem2 mem -t {threads} {input.ref} {input.r1} {input.r2} 2> {log} | \
+        samtools view -@ {threads} -b -F 0x900 - | \
+        samtools sort -@ {threads} -T /beegfs/data/plecossec/cimex/tmp/{wildcards.sample} \
+            -o {output.bam}
+        """ 
+
+
+rule filtering_results:
+    input:
+        res = MAPPING + "{sample}_mapped_database.bam"
+    output:
+        bam = FILTERING + "{sample}_filtered.bam"
+    conda:
+        CONDA_DIR + "bwa2_samtools.yaml"
+    log:
+        FILTERING + "logs/{sample}.log"
+    benchmark:
+        FILTERING + "benchmarks/{sample}_filtered.txt"
+    threads: 4
+    resources:
+        runtime = 60,
+        mem_mb = 2000
+
+# -H : inclut le header avec l'alignement 
+# -e rlen : filtre sur longueur de l'alignement
+# -q : filtre sur score qualité du mapping
+# NM:i:0 et 1 : garde que les alignements avec 0 ou 1 mismatch  
+# -b : sorti au format bam
+# grep -v 'XA' : enlève reads mappés à plusieurs endroits
+
+    shell:
+        """
+        {{
+            samtools view -H {input.res} ;
+            samtools view -@ {threads} \
+                -e 'rlen >= 140' \
+                -q 20 \
+                {input.res} \
+            | awk '($12 == "NM:i:0" || $12 == "NM:i:1" || $12 == "NM:i:2")' \
+            | {{ grep -v 'XA:' || true; }}
+        }} | samtools view -@ {threads} -b -o {output.bam} \
+        2> {log}
+        """
